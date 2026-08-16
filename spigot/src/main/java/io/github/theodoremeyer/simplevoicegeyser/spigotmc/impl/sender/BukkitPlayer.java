@@ -3,7 +3,7 @@ package io.github.theodoremeyer.simplevoicegeyser.spigotmc.impl.sender;
 import io.github.theodoremeyer.simplevoicegeyser.core.SvgCore;
 import io.github.theodoremeyer.simplevoicegeyser.core.api.sender.SvgPlayer;
 import io.github.theodoremeyer.simplevoicegeyser.spigotmc.SvgPlugin;
-import org.bukkit.Bukkit;
+import io.github.theodoremeyer.simplevoicegeyser.spigotmc.impl.FoliaCompat;
 import org.bukkit.ChatColor;
 import org.bukkit.entity.Player;
 
@@ -34,13 +34,8 @@ public class BukkitPlayer extends SvgPlayer {
 
     @Override
     public void chat(String message) {
-        if (Bukkit.isPrimaryThread()) {
-            player.chat(message);
-        } else {
-            SvgPlugin plugin = (SvgPlugin) SvgCore.getPlatform();
-
-            Bukkit.getScheduler().runTask(plugin, () -> player.chat(message));
-        }
+        SvgPlugin plugin = (SvgPlugin) SvgCore.getPlatform();
+        FoliaCompat.runAtEntity(plugin, player, () -> player.chat(message));
     }
 
     @Override
@@ -59,15 +54,7 @@ public class BukkitPlayer extends SvgPlayer {
     }
 
     private void runOnMainThread(Runnable task) {
-        if (Bukkit.isPrimaryThread()) {
-            task.run();
-            return;
-        }
-
-        Bukkit.getScheduler().runTask(
-                SvgPlugin.getPlugin(SvgPlugin.class),
-                task
-        );
+        FoliaCompat.runAtEntity(SvgPlugin.getPlugin(SvgPlugin.class), player, task);
     }
 
     private String translate(String message) {

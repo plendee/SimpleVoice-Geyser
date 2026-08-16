@@ -1,0 +1,144 @@
+diff --git a/spigot/src/main/java/io/github/theodoremeyer/simplevoicegeyser/spigotmc/impl/FoliaCompat.java b/spigot/src/main/java/io/github/theodoremeyer/simplevoicegeyser/spigotmc/impl/FoliaCompat.java
+new file mode 100644
+index 0000000..3fd5fc9
+--- /dev/null
++++ b/spigot/src/main/java/io/github/theodoremeyer/simplevoicegeyser/spigotmc/impl/FoliaCompat.java
+@@ -0,0 +1,83 @@
++package io.github.theodoremeyer.simplevoicegeyser.spigotmc.impl;
++
++import org.bukkit.Bukkit;
++import org.bukkit.entity.Entity;
++import org.bukkit.plugin.Plugin;
++
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import java.util.function.Consumer;
++
++/**
++ * Small compatibility layer so the plugin can schedule player-bound work
++ * correctly on both classic Bukkit/Spigot/Paper servers (single primary
++ * thread) and Folia (per-region threads, no primary thread).
++ * <p>
++ * Uses reflection to call Paper/Folia's {@code Entity#getScheduler()} /
++ * {@code EntityScheduler#run(...)} so the {@code spigot} module can keep
++ * compiling against plain {@code spigot-api} without a hard dependency on
++ * Paper/Folia API jars.
++ */
++public final class FoliaCompat {
++
++    private static final boolean FOLIA;
++
++    static {
++        boolean folia;
++        try {
++            Class.forName("io.papermc.paper.threadedregions.RegionizedServer");
++            folia = true;
++        } catch (ClassNotFoundException e) {
++            folia = false;
++        }
++        FOLIA = folia;
++    }
++
++    private FoliaCompat() {
++    }
++
++    public static boolean isFolia() {
++        return FOLIA;
++    }
++
++    /**
++     * Runs {@code task} on the thread that owns {@code entity}.
++     * <p>
++     * On Folia this dispatches via the entity's region scheduler (retrying
++     * automatically until the entity is scheduled; silently dropped if the
++     * entity has since been removed/retired, mirroring Folia's own
++     * semantics). On non-Folia servers this preserves the previous
++     * behaviour: run inline if already on the primary thread, otherwise
++     * hop onto it via the classic Bukkit scheduler.
++     */
++    public static void runAtEntity(Plugin plugin, Entity entity, Runnable task) {
++        if (FOLIA) {
++            runViaEntityScheduler(plugin, entity, task);
++            return;
++        }
++
++        if (Bukkit.isPrimaryThread()) {
++            task.run();
++        } else {
++            Bukkit.getScheduler().runTask(plugin, task);
++        }
++    }
++
++    private static void runViaEntityScheduler(Plugin plugin, Entity entity, Runnable task) {
++        try {
++            Object scheduler = Entity.class.getMethod("getScheduler").invoke(entity);
++
++            Method run = scheduler.getClass().getMethod(
++                    "run", Plugin.class, Consumer.class, Runnable.class);
++
++            Consumer<Object> wrapped = scheduledTask -> task.run();
++
++            run.invoke(scheduler, plugin, wrapped, (Runnable) null);
++        } catch (NoSuchMethodException | IllegalAccessException e) {
++            throw new IllegalStateException(
++                    "Server reports itself as Folia but is missing the entity scheduler API", e);
++        } catch (InvocationTargetException e) {
++            throw new RuntimeException("Failed to schedule Folia entity task", e.getCause());
++        }
++    }
++}
+diff --git a/spigot/src/main/java/io/github/theodoremeyer/simplevoicegeyser/spigotmc/impl/sender/BukkitPlayer.java b/spigot/src/main/java/io/github/theodoremeyer/simplevoicegeyser/spigotmc/impl/sender/BukkitPlayer.java
+index 38b54b8..d5943ae 100644
+--- a/spigot/src/main/java/io/github/theodoremeyer/simplevoicegeyser/spigotmc/impl/sender/BukkitPlayer.java
++++ b/spigot/src/main/java/io/github/theodoremeyer/simplevoicegeyser/spigotmc/impl/sender/BukkitPlayer.java
+@@ -3,7 +3,7 @@ package io.github.theodoremeyer.simplevoicegeyser.spigotmc.impl.sender;
+ import io.github.theodoremeyer.simplevoicegeyser.core.SvgCore;
+ import io.github.theodoremeyer.simplevoicegeyser.core.api.sender.SvgPlayer;
+ import io.github.theodoremeyer.simplevoicegeyser.spigotmc.SvgPlugin;
+-import org.bukkit.Bukkit;
++import io.github.theodoremeyer.simplevoicegeyser.spigotmc.impl.FoliaCompat;
+ import org.bukkit.ChatColor;
+ import org.bukkit.entity.Player;
+ 
+@@ -34,13 +34,8 @@ public class BukkitPlayer extends SvgPlayer {
+ 
+     @Override
+     public void chat(String message) {
+-        if (Bukkit.isPrimaryThread()) {
+-            player.chat(message);
+-        } else {
+-            SvgPlugin plugin = (SvgPlugin) SvgCore.getPlatform();
+-
+-            Bukkit.getScheduler().runTask(plugin, () -> player.chat(message));
+-        }
++        SvgPlugin plugin = (SvgPlugin) SvgCore.getPlatform();
++        FoliaCompat.runAtEntity(plugin, player, () -> player.chat(message));
+     }
+ 
+     @Override
+@@ -59,15 +54,7 @@ public class BukkitPlayer extends SvgPlayer {
+     }
+ 
+     private void runOnMainThread(Runnable task) {
+-        if (Bukkit.isPrimaryThread()) {
+-            task.run();
+-            return;
+-        }
+-
+-        Bukkit.getScheduler().runTask(
+-                SvgPlugin.getPlugin(SvgPlugin.class),
+-                task
+-        );
++        FoliaCompat.runAtEntity(SvgPlugin.getPlugin(SvgPlugin.class), player, task);
+     }
+ 
+     private String translate(String message) {
+diff --git a/spigot/src/main/resources/plugin.yml b/spigot/src/main/resources/plugin.yml
+index 27827ef..401ad52 100644
+--- a/spigot/src/main/resources/plugin.yml
++++ b/spigot/src/main/resources/plugin.yml
+@@ -8,6 +8,7 @@ website: https://theodoremeyer.github.io
+ depend: [voicechat]
+ softdepend: [Geyser-Spigot, floodgate]
+ prefix: SVG
++folia-supported: true
